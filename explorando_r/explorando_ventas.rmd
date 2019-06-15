@@ -1,0 +1,307 @@
+---
+title: "explorando_ventas"
+author: "julio"
+date: "15 de junio de 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(skimr)
+library(lubridate)
+library(readr)
+library(prophet)
+```
+
+
+# levanta datos y estructura
+```{r data}
+ventas_data <- readr::read_delim(here::here("ventas.txt"),delim = "|")
+
+glimpse(ventas_data)
+
+skimr::skim(ventas_data)
+```
+
+
+# mini analisis de como se distribuyen los datos
+
+## serie total
+
+```{r ver_serie}
+ventas_data %>% 
+    ggplot(aes(x=fecha,y=unidades)) +
+    geom_line()
+```
+
+se ve que hay cierta tendencia anual. veremos por meses
+
+## analisis mensual
+
+
+```{r serie_mes}
+ventas_procesado <- ventas_data %>% 
+    mutate(mes=lubridate::month(fecha)) %>% 
+    mutate(anio=lubridate::year(fecha))
+
+labs_mes <- ventas_procesado %>% 
+    count(anio,mes) %>% 
+    distinct(mes) %>% arrange(mes)%>% pull()
+
+ventas_procesado %>% 
+    count(anio,mes) %>% 
+    ggplot(aes(x=mes,y=n,fill=as.character(anio))) +
+    geom_col()+
+     scale_x_discrete(labels=labs_mes,breaks=labs_mes)+
+    # scale_x_discrete(labels=as.character(c(1:12)))+
+    coord_flip()+
+    labs(x="",y="#ventas",fill="Año",
+         title="Ventas por mes por año")
+```
+
+```{r}
+cotas_anio <- ventas_procesado %>% 
+    group_by(anio) %>% 
+    summarise(maxima_fecha=max(fecha),minima_fecha=min(fecha))
+    
+cotas_anio
+```
+
+```{r}
+ventas_procesado %>% 
+    ggplot(aes(x=fecha,y=unidades,color=as.factor(anio))) +
+    geom_line()+
+    geom_vline(xintercept = cotas_anio$minima_fecha,linetype=2)+
+    geom_hline(yintercept = 0,linetype=2)+
+    geom_vline(xintercept = cotas_anio$maxima_fecha,linetype=2,color="#ff0000")+
+    facet_grid(anio~.,scales="free_y")+
+    theme(axis.text.x = element_text(angle = 90))+
+    labs(x="",y="#ventas",fill="Año",
+         title="Ventas por año")
+    
+    
+```
+
+- vemos que son varios años,
+- vemos que hay estacionalidad por año,
+- tambien vemos que hay valores negativos, son los que devolvieron ? 
+- vemos que en todas las fechas arranca en diferentes periodos.
+
+# el objetivo es modelar las ventas de diciembre 2014
+
+```{r}
+glimpse(ventas_procesado)
+
+
+ventas_procesado %>% count(fecha,id_pos,sort = TRUE) %>% 
+    # filter(n>1) %>% 
+    arrange(desc(n))
+
+ventas_acum_total <- ventas_procesado %>% 
+    group_by(fecha) %>% 
+    summarise(total_cantidad=sum(unidades))
+
+ventas_acum_por_punto <- ventas_procesado %>% 
+    group_by(fecha,id_pos) %>% 
+    summarise(total_cantidad=sum(unidades))
+
+```
+
+# prophet total ventas
+
+```{r diciembre_2014, intento1}
+
+# readr::write_delim(delim = "|",path = here::here("feriados_arg_2012_2014.txt"),x = argentina_holidays_2012_2014)
+argentina_holidays_2012_2014 <- readr::read_delim(delim = "|",file = here::here("feriados_arg_2012_2014.txt"))
+
+current_min <- lubridate::as_date("2014-10-01")
+current_max <- lubridate::as_date("2014-11-30")
+
+current_ds <- ventas_acum_total %>% 
+  select(fecha,total_cantidad) %>% #selecciono campos para prophet
+  rename(ds=fecha,y=total_cantidad) %>% # ACA HAY QUE LABURAR EL VALOR.
+  filter(ds >= current_min & ds <= current_max )
+
+ts_para_model <- current_ds 
+
+holidays_argentina_2014 <- argentina_holidays_2012_2014 %>%
+    mutate(holiday=paste0("feriado_",ds)) %>% 
+    filter(lubridate::year(ds)==2014)
+# arma el modelo
+prophet_model <- prophet(current_ds,
+                   yearly.seasonality = TRUE,
+                   weekly.seasonality = TRUE,
+                   daily.seasonality = TRUE,
+                   holidays = holidays_argentina_2014)
+
+
+# seleccionar periodo train <- 
+# future:
+desde_futuro <- lubridate::as_date("2014-12-01")
+hasta_futuro <- lubridate::as_date("2014-12-31")
+secuencia_futuro <- seq(from=desde_futuro,
+                   to = hasta_futuro,
+                   by=1)# de a 1 dia
+
+
+pasado_y_futuro_dates <- c(current_ds %>% pull(ds),secuencia_futuro)
+
+
+df_futuro <- data.frame(ds= pasado_y_futuro_dates)
+
+prediccion_diciembre <- predict(prophet_model,df_futuro)
+
+valores_originales <- current_ds %>% 
+    select(ds,y) %>% 
+    rename(valor=y) %>% 
+    mutate(serie="serie")
+
+prediccion_diciembre %>% 
+    gather(serie,valor,-ds) %>% 
+    filter(serie=="yhat") %>% 
+    mutate(ds=lubridate::date(ds)) %>% 
+    union_all(valores_originales) %>% 
+    arrange(ds) %>%
+    ggplot(aes(x = ds,y=valor,color=serie))+
+    geom_line()
+
+```
+
+# prophet total ventas del 2013 
+
+para ver si le pega a lo que realmente fue
+
+```{r diciembre_2014, intento1}
+
+anio_predecir_2013 <- 2013
+
+# readr::write_delim(delim = "|",path = here::here("feriados_arg_2012_2014.txt"),x = argentina_holidays_2012_2014)
+argentina_holidays_2012_2014 <- readr::read_delim(delim = "|",file = here::here("feriados_arg_2012_2014.txt"))
+
+current_min <- lubridate::as_date(paste0(anio_predecir_2013,"-10-01"))
+current_max <- lubridate::as_date(paste0(anio_predecir_2013,"-11-30"))
+
+current_ds <- ventas_acum_total %>% 
+  select(fecha,total_cantidad) %>% #selecciono campos para prophet
+  rename(ds=fecha,y=total_cantidad) %>% # ACA HAY QUE LABURAR EL VALOR.
+  filter(ds >= current_min & ds <= current_max +days(1))
+
+# ventas_acum_total %>% filter(fecha >= current_min & fecha <= current_max )
+# ventas_acum_total %>% filter(year(fecha) == 2013)
+# ventas_acum_total %>% filter(fecha <= current_max)
+# fecha
+
+ts_para_model <- current_ds 
+
+holidays_argentina_2013 <- argentina_holidays_2012_2014 %>%
+    mutate(holiday=paste0("feriado_",ds)) %>% 
+    filter(lubridate::year(ds)==anio_predecir_2013)
+
+# seleccionar periodo a predecir
+# future:
+desde_futuro <- lubridate::as_date(paste0(anio_predecir_2013,"-12-01"))
+hasta_futuro <- lubridate::as_date(paste0(anio_predecir_2013,"-12-31"))
+secuencia_futuro <- seq(from=desde_futuro,
+                   to = hasta_futuro,
+                   by=1)# de a 1 dia
+
+pasado_y_futuro_dates <- c(current_ds %>% pull(ds),secuencia_futuro)
+df_futuro <- data.frame(ds= pasado_y_futuro_dates)
+
+```
+
+# con modelo aditivo
+
+```{r}
+
+# arma el modelo
+prophet_model_aditivo <- prophet(current_ds,
+                         seasonality.mode = "additive",
+                   yearly.seasonality = TRUE,
+                   weekly.seasonality = TRUE,
+                   daily.seasonality = TRUE,
+                   holidays = holidays_argentina_2013)
+
+
+# prediccion
+
+prediccion_diciembre_aditivo <- predict(prophet_model_aditivo,df_futuro)
+prediccion_diciembre_aditivo_gather <- prediccion_diciembre_aditivo %>% 
+    gather(serie,valor,-ds) %>% 
+    filter(serie=="yhat") %>% 
+    mutate(serie=if_else(serie=="yhat","aditivo",serie)) %>% 
+    mutate(ds=lubridate::date(ds))  
+
+```
+
+
+# con modelo multiplicativo
+
+```{r}
+
+# arma el modelo
+prophet_model_multi <- prophet(current_ds,
+                         seasonality.mode = "multiplicative",
+                   yearly.seasonality = TRUE,
+                   weekly.seasonality = TRUE,
+                   daily.seasonality = TRUE,
+                   holidays = holidays_argentina_2013)
+
+
+# seleccionar periodo train <- 
+# future:
+desde_futuro <- lubridate::as_date(paste0(anio_predecir_2013,"-12-01"))
+hasta_futuro <- lubridate::as_date(paste0(anio_predecir_2013,"-12-31"))
+secuencia_futuro <- seq(from=desde_futuro,
+                   to = hasta_futuro,
+                   by=1)# de a 1 dia
+
+
+pasado_y_futuro_dates <- c(current_ds %>% pull(ds),secuencia_futuro)
+
+
+df_futuro <- data.frame(ds= pasado_y_futuro_dates)
+
+prediccion_diciembre_multiplicativo <- predict(prophet_model_multi,df_futuro)
+
+prediccion_diciembre_multiplicativo_gather <- prediccion_diciembre %>% 
+    gather(serie,valor,-ds) %>% 
+    filter(serie=="yhat") %>% 
+    mutate(serie=if_else(serie=="yhat","multiplicativo",serie)) %>% 
+    mutate(ds=lubridate::date(ds))  
+
+```
+
+
+
+```{r}
+valores_reales <- ventas_acum_total %>% 
+  select(fecha,total_cantidad) %>% #selecciono campos para prophet
+  rename(ds=fecha,valor=total_cantidad) %>% # ACA HAY QUE LABURAR EL VALOR.
+  filter(ds >= current_min & ds <= hasta_futuro ) %>% 
+  mutate(serie="original")
+
+valores_originales <- current_ds %>% 
+    select(ds,y) %>% 
+    rename(valor=y) %>% 
+    mutate(serie="serie")
+```
+
+### prediccion modelo multiplicativo
+
+```{r}
+prediccion_diciembre_multiplicativo_gather %>% 
+    union_all(prediccion_diciembre_aditivo_gather) %>%
+    union_all(valores_originales) %>% 
+    union_all(valores_reales) %>% 
+    arrange(ds) %>%
+    ggplot(aes(x = ds,y=valor,color=serie))+
+    geom_line()+
+    facet_grid(serie~.,scales="free_y")
+
+```
+
+
+
+
